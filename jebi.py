@@ -2,6 +2,7 @@ import os
 import socket
 import ssl
 import time
+import gzip
 
 
 HTTP_PORT = 80
@@ -52,6 +53,7 @@ class URL:
         headers = {
             "Host": self.host,
             "User-Agent": USER_AGENT,
+            "Accept-Encoding": "gzip",
         }
         return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
 
@@ -128,12 +130,34 @@ class URL:
         return response_headers
 
     def _read_http_body(self, response, response_headers):
-        assert "transfer-encoding" not in response_headers
-        assert "content-encoding" not in response_headers
-        assert "content-length" in response_headers
+        if response_headers.get("transfer-encoding") == "chunked":
+            body = self._read_chunked_body(response)
+        else:
+            assert "transfer-encoding" not in response_headers
+            assert "content-length" in response_headers
+            content_length = int(response_headers["content-length"])
+            body = response.read(content_length)
 
-        content_length = int(response_headers["content-length"])
-        return response.read(content_length).decode("utf8")
+        if response_headers.get("content-encoding") == "gzip":
+            body = gzip.decompress(body)
+        else:
+            assert "content-encoding" not in response_headers
+        return body.decode("utf8")
+
+    def _read_chunked_body(self, response):
+        chunks = []
+        while True:
+            size_line = response.readline().decode("utf8").strip()
+            chunk_size = int(size_line.split(";", 1)[0], 16)
+            if chunk_size == 0:
+                while True:
+                    trailer = response.readline()
+                    if trailer == b"\r\n":
+                        break
+                break
+            chunks.append(response.read(chunk_size))
+            assert response.read(2) == b"\r\n"
+        return b"".join(chunks)
 
     def _request_over_http(self):
         retry_errors = (
