@@ -1,13 +1,15 @@
+import gzip
 import os
 import socket
 import ssl
 import time
-import gzip
 
 
 HTTP_PORT = 80
 HTTPS_PORT = 443
 MAX_REDIRECTS = 10
+MAX_REQUEST_RETRIES = 2
+
 USER_AGENT = "jebi/1.0"
 DEFAULT_FILE = "default.txt"
 
@@ -21,27 +23,27 @@ class URL:
             self._parse_data_url(raw_url)
             return
 
-        self.scheme, url = raw_url.split("://", 1)
+        self.scheme, rest = raw_url.split("://", 1)
         assert self.scheme in ["http", "https", "file"]
 
         if self.scheme == "file":
-            self._parse_file_url(url)
+            self._parse_file_url(rest)
             return
 
-        self._parse_http_url(url)
+        self._parse_http_url(rest)
 
     def _parse_data_url(self, raw_url):
         self.scheme = "data"
         _, self.data = raw_url.split(",", 1)
 
-    def _parse_file_url(self, url):
-        self.path = "/" + url.lstrip("/")
+    def _parse_file_url(self, rest):
+        self.path = "/" + rest.lstrip("/")
 
-    def _parse_http_url(self, url):
-        if "/" not in url:
-            url += "/"
+    def _parse_http_url(self, rest):
+        if "/" not in rest:
+            rest += "/"
 
-        self.host, path = url.split("/", 1)
+        self.host, path = rest.split("/", 1)
         self.path = "/" + path
         self.port = HTTP_PORT if self.scheme == "http" else HTTPS_PORT
 
@@ -55,7 +57,7 @@ class URL:
             "User-Agent": USER_AGENT,
             "Accept-Encoding": "gzip",
         }
-        return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
+        return "".join(f"{name}: {value}\r\n" for name, value in headers.items())
 
     def connection_key(self):
         return (self.scheme, self.host, self.port)
@@ -64,18 +66,18 @@ class URL:
         return (self.scheme, self.host, self.port, self.path)
 
     def open_connection(self):
-        s = socket.socket(
+        sock = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
             proto=socket.IPPROTO_TCP,
         )
-        s.connect((self.host, self.port))
+        sock.connect((self.host, self.port))
 
         if self.scheme == "https":
-            ctx = ssl.create_default_context()
-            s = ctx.wrap_socket(s, server_hostname=self.host)
+            context = ssl.create_default_context()
+            sock = context.wrap_socket(sock, server_hostname=self.host)
 
-        return (s, s.makefile("rb"))
+        return (sock, sock.makefile("rb"))
 
     def get_connection(self):
         key = self.connection_key()
@@ -88,9 +90,9 @@ class URL:
         if key not in URL.connections:
             return
 
-        s, response = URL.connections.pop(key)
+        sock, response = URL.connections.pop(key)
         response.close()
-        s.close()
+        sock.close()
 
     def origin(self):
         if self.scheme == "http" and self.port == HTTP_PORT:
@@ -111,53 +113,55 @@ class URL:
         return request
 
     def _read_status(self, response):
-        statusline = response.readline()
-        if statusline == b"":
+        status_line = response.readline()
+        if status_line == b"":
             raise ConnectionError("closed")
 
-        _version, status, _explanation = statusline.decode("utf8").split(" ", 2)
+        _version, status, _explanation = status_line.decode("utf8").split(" ", 2)
         return int(status)
 
     def _read_headers(self, response):
-        response_headers = {}
+        headers = {}
         while True:
             line = response.readline()
             if line == b"\r\n":
                 break
 
-            header, value = line.decode("utf8").split(":", 1)
-            response_headers[header.casefold()] = value.strip()
-        return response_headers
-
-    def _read_http_body(self, response, response_headers):
-        if response_headers.get("transfer-encoding") == "chunked":
-            body = self._read_chunked_body(response)
-        else:
-            assert "transfer-encoding" not in response_headers
-            assert "content-length" in response_headers
-            content_length = int(response_headers["content-length"])
-            body = response.read(content_length)
-
-        if response_headers.get("content-encoding") == "gzip":
-            body = gzip.decompress(body)
-        else:
-            assert "content-encoding" not in response_headers
-        return body.decode("utf8")
+            name, value = line.decode("utf8").split(":", 1)
+            headers[name.casefold()] = value.strip()
+        return headers
 
     def _read_chunked_body(self, response):
         chunks = []
         while True:
-            size_line = response.readline().decode("utf8").strip()
-            chunk_size = int(size_line.split(";", 1)[0], 16)
+            chunk_size_line = response.readline().decode("utf8").strip()
+            chunk_size = int(chunk_size_line.split(";", 1)[0], 16)
             if chunk_size == 0:
-                while True:
-                    trailer = response.readline()
-                    if trailer == b"\r\n":
-                        break
+                while response.readline() != b"\r\n":
+                    pass
                 break
+
             chunks.append(response.read(chunk_size))
             assert response.read(2) == b"\r\n"
+
         return b"".join(chunks)
+
+    def _read_body_bytes(self, response, headers):
+        if headers.get("transfer-encoding") == "chunked":
+            return self._read_chunked_body(response)
+
+        assert "transfer-encoding" not in headers
+        assert "content-length" in headers
+
+        content_length = int(headers["content-length"])
+        return response.read(content_length)
+
+    def _decode_body(self, body_bytes, headers):
+        if headers.get("content-encoding") == "gzip":
+            body_bytes = gzip.decompress(body_bytes)
+        else:
+            assert "content-encoding" not in headers
+        return body_bytes.decode("utf8")
 
     def _request_over_http(self):
         retry_errors = (
@@ -167,16 +171,16 @@ class URL:
             OSError,
         )
 
-        for _ in range(2):
-            s, response = self.get_connection()
+        for _ in range(MAX_REQUEST_RETRIES):
+            sock, response = self.get_connection()
             try:
-                request = self._build_http_request()
-                s.sendall(request.encode("utf8"))
+                sock.sendall(self._build_http_request().encode("utf8"))
 
                 status = self._read_status(response)
-                response_headers = self._read_headers(response)
-                body = self._read_http_body(response, response_headers)
-                return (status, response_headers, body)
+                headers = self._read_headers(response)
+                body_bytes = self._read_body_bytes(response, headers)
+                body = self._decode_body(body_bytes, headers)
+                return (status, headers, body)
             except retry_errors:
                 self.drop_connection()
 
@@ -187,62 +191,69 @@ class URL:
         if key not in URL.cache:
             return None
 
-        status, response_headers, body, expires_at = URL.cache[key]
+        status, headers, body, expires_at = URL.cache[key]
         if expires_at is not None and time.time() > expires_at:
             del URL.cache[key]
             return None
 
-        return (status, response_headers, body)
+        return (status, headers, body)
 
-    def _cache_policy(self, response_headers):
-        if "cache-control" not in response_headers:
+    def _cache_policy(self, headers):
+        cache_control = headers.get("cache-control")
+        if cache_control is None:
             return (True, None)
 
-        directives = [
-            item.strip().casefold()
-            for item in response_headers["cache-control"].split(",")
-        ]
+        directives = [token.strip().casefold() for token in cache_control.split(",")]
         max_age = None
+
         for directive in directives:
             if directive == "no-store":
                 return (False, None)
+
             if directive.startswith("max-age="):
                 value = directive.split("=", 1)[1]
                 if not value.isdigit():
                     return (False, None)
                 max_age = int(value)
                 continue
+
             return (False, None)
 
         if max_age is None:
             return (True, None)
         return (True, time.time() + max_age)
 
-    def _write_cache(self, status, response_headers, body):
+    def _write_cache(self, status, headers, body):
         if status != 200:
             return
 
-        should_cache, expires_at = self._cache_policy(response_headers)
+        should_cache, expires_at = self._cache_policy(headers)
         if not should_cache:
             return
 
-        URL.cache[self.cache_key()] = (status, response_headers, body, expires_at)
+        URL.cache[self.cache_key()] = (status, headers, body, expires_at)
+
+    def _request_data(self):
+        return (200, {}, self.data)
+
+    def _request_file(self):
+        with open(self.path, "r", encoding="utf8") as file_obj:
+            return (200, {}, file_obj.read())
 
     def request_response(self):
         if self.scheme == "data":
-            return (200, {}, self.data)
+            return self._request_data()
 
         if self.scheme == "file":
-            with open(self.path, "r", encoding="utf8") as f:
-                return (200, {}, f.read())
+            return self._request_file()
 
         cached = self._read_cache()
         if cached is not None:
             return cached
 
-        status, response_headers, body = self._request_over_http()
-        self._write_cache(status, response_headers, body)
-        return (status, response_headers, body)
+        status, headers, body = self._request_over_http()
+        self._write_cache(status, headers, body)
+        return (status, headers, body)
 
     def request(self):
         _, _, body = self.request_response()
@@ -255,26 +266,28 @@ def show(body, view_source=False):
         return
 
     in_tag = False
-    i = 0
-    while i < len(body):
-        if not in_tag and body.startswith("&lt;", i):
+    index = 0
+
+    while index < len(body):
+        if not in_tag and body.startswith("&lt;", index):
             print("<", end="")
-            i += 4
+            index += 4
             continue
 
-        if not in_tag and body.startswith("&gt;", i):
+        if not in_tag and body.startswith("&gt;", index):
             print(">", end="")
-            i += 4
+            index += 4
             continue
 
-        c = body[i]
-        if c == "<":
+        char = body[index]
+        if char == "<":
             in_tag = True
-        elif c == ">":
+        elif char == ">":
             in_tag = False
         elif not in_tag:
-            print(c, end="")
-        i += 1
+            print(char, end="")
+
+        index += 1
 
 
 def load(url: URL, view_source=False):
@@ -282,11 +295,12 @@ def load(url: URL, view_source=False):
     current_url = url
 
     while True:
-        status, response_headers, body = current_url.request_response()
+        status, headers, body = current_url.request_response()
         if 300 <= status < 400:
             assert redirect_count < MAX_REDIRECTS, "too many redirects"
-            assert "location" in response_headers
-            next_url = current_url.resolve(response_headers["location"])
+            assert "location" in headers
+
+            next_url = current_url.resolve(headers["location"])
             current_url = URL(next_url)
             redirect_count += 1
             continue
@@ -299,15 +313,15 @@ if __name__ == "__main__":
     import sys
 
     if len(sys.argv) > 1:
-        url = sys.argv[1]
+        raw_url = sys.argv[1]
     else:
         default_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), DEFAULT_FILE
         )
-        url = "file://" + default_path
+        raw_url = "file://" + default_path
 
-    view_source = url.startswith("view-source:")
+    view_source = raw_url.startswith("view-source:")
     if view_source:
-        url = url[len("view-source:") :]
+        raw_url = raw_url[len("view-source:") :]
 
-    load(URL(url), view_source=view_source)
+    load(URL(raw_url), view_source=view_source)
