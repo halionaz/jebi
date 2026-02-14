@@ -1,3 +1,4 @@
+import os
 import socket
 import ssl
 
@@ -5,7 +6,11 @@ import ssl
 class URL:
     def __init__(self, url):
         self.scheme, url = url.split("://", 1)
-        assert self.scheme in ["http", "https"]
+        assert self.scheme in ["http", "https", "file"]
+
+        if self.scheme == "file":
+            self.path = "/" + url.lstrip("/")
+            return
 
         if "/" not in url:
             url = url + "/"
@@ -30,6 +35,10 @@ class URL:
         return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
 
     def request(self):
+        if self.scheme == "file":
+            with open(self.path, "r", encoding="utf8") as f:
+                return f.read()
+
         s = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
@@ -84,4 +93,11 @@ def load(url: URL):
 if __name__ == "__main__":
     import sys
 
-    load(URL(sys.argv[1]))
+    if len(sys.argv) > 1:
+        url = sys.argv[1]
+    else:
+        default_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "default.txt"
+        )
+        url = "file://" + default_path
+    load(URL(url))
