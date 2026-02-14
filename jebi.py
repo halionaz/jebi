@@ -82,7 +82,11 @@ class URL:
         return body
 
 
-def show(body):
+def show(body, view_source=False):
+    if view_source:
+        print(body, end="")
+        return
+
     in_tag = False
     i = 0
     while i < len(body):
@@ -103,9 +107,9 @@ def show(body):
         i += 1
 
 
-def load(url: URL):
+def load(url: URL, view_source=False):
     body = url.request()
-    show(body)
+    show(body, view_source=view_source)
 
 
 if __name__ == "__main__":
@@ -118,4 +122,9 @@ if __name__ == "__main__":
             os.path.dirname(os.path.abspath(__file__)), "default.txt"
         )
         url = "file://" + default_path
-    load(URL(url))
+
+    view_source = url.startswith("view-source:")
+    if view_source:
+        url = url[len("view-source:") :]
+
+    load(URL(url), view_source=view_source)
