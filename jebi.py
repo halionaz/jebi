@@ -1,6 +1,7 @@
 import os
 import socket
 import ssl
+import time
 
 
 HTTP_PORT = 80
@@ -12,6 +13,7 @@ DEFAULT_FILE = "default.txt"
 
 class URL:
     connections = {}
+    cache = {}
 
     def __init__(self, raw_url):
         if raw_url.startswith("data:"):
@@ -55,6 +57,9 @@ class URL:
 
     def connection_key(self):
         return (self.scheme, self.host, self.port)
+
+    def cache_key(self):
+        return (self.scheme, self.host, self.port, self.path)
 
     def open_connection(self):
         s = socket.socket(
@@ -153,6 +158,52 @@ class URL:
 
         raise AssertionError("could not fetch response")
 
+    def _read_cache(self):
+        key = self.cache_key()
+        if key not in URL.cache:
+            return None
+
+        status, response_headers, body, expires_at = URL.cache[key]
+        if expires_at is not None and time.time() > expires_at:
+            del URL.cache[key]
+            return None
+
+        return (status, response_headers, body)
+
+    def _cache_policy(self, response_headers):
+        if "cache-control" not in response_headers:
+            return (True, None)
+
+        directives = [
+            item.strip().casefold()
+            for item in response_headers["cache-control"].split(",")
+        ]
+        max_age = None
+        for directive in directives:
+            if directive == "no-store":
+                return (False, None)
+            if directive.startswith("max-age="):
+                value = directive.split("=", 1)[1]
+                if not value.isdigit():
+                    return (False, None)
+                max_age = int(value)
+                continue
+            return (False, None)
+
+        if max_age is None:
+            return (True, None)
+        return (True, time.time() + max_age)
+
+    def _write_cache(self, status, response_headers, body):
+        if status != 200:
+            return
+
+        should_cache, expires_at = self._cache_policy(response_headers)
+        if not should_cache:
+            return
+
+        URL.cache[self.cache_key()] = (status, response_headers, body, expires_at)
+
     def request_response(self):
         if self.scheme == "data":
             return (200, {}, self.data)
@@ -161,7 +212,13 @@ class URL:
             with open(self.path, "r", encoding="utf8") as f:
                 return (200, {}, f.read())
 
-        return self._request_over_http()
+        cached = self._read_cache()
+        if cached is not None:
+            return cached
+
+        status, response_headers, body = self._request_over_http()
+        self._write_cache(status, response_headers, body)
+        return (status, response_headers, body)
 
     def request(self):
         _, _, body = self.request_response()
