@@ -5,6 +5,11 @@ import ssl
 
 class URL:
     def __init__(self, url):
+        if url.startswith("data:"):
+            self.scheme = "data"
+            _, self.data = url.split(",", 1)
+            return
+
         self.scheme, url = url.split("://", 1)
         assert self.scheme in ["http", "https", "file"]
 
@@ -35,6 +40,9 @@ class URL:
         return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
 
     def request(self):
+        if self.scheme == "data":
+            return self.data
+
         if self.scheme == "file":
             with open(self.path, "r", encoding="utf8") as f:
                 return f.read()
