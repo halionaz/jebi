@@ -21,6 +21,14 @@ class URL:
             self.host, port = self.host.split(":", 1)
             self.port = int(port)
 
+    def build_headers(self):
+        headers = {
+            "Host": self.host,
+            "User-Agent": "jebi/1.0",
+            "Connection": "close",
+        }
+        return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
+
     def request(self):
         s = socket.socket(
             family=socket.AF_INET,
@@ -33,8 +41,8 @@ class URL:
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
 
-        request = f"GET {self.path} HTTP/1.0\r\n"
-        request += f"Host: {self.host}\r\n"
+        request = f"GET {self.path} HTTP/1.1\r\n"
+        request += self.build_headers()
         request += "\r\n"
         s.send(request.encode("utf8"))
 
