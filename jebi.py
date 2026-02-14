@@ -4,6 +4,8 @@ import ssl
 
 
 class URL:
+    connections = {}
+
     def __init__(self, url):
         if url.startswith("data:"):
             self.scheme = "data"
@@ -35,18 +37,13 @@ class URL:
         headers = {
             "Host": self.host,
             "User-Agent": "jebi/1.0",
-            "Connection": "close",
         }
         return "".join(f"{header}: {value}\r\n" for header, value in headers.items())
 
-    def request(self):
-        if self.scheme == "data":
-            return self.data
+    def connection_key(self):
+        return (self.scheme, self.host, self.port)
 
-        if self.scheme == "file":
-            with open(self.path, "r", encoding="utf8") as f:
-                return f.read()
-
+    def open_connection(self):
         s = socket.socket(
             family=socket.AF_INET,
             type=socket.SOCK_STREAM,
@@ -58,28 +55,61 @@ class URL:
             ctx = ssl.create_default_context()
             s = ctx.wrap_socket(s, server_hostname=self.host)
 
-        request = f"GET {self.path} HTTP/1.1\r\n"
-        request += self.build_headers()
-        request += "\r\n"
-        s.send(request.encode("utf8"))
+        return (s, s.makefile("rb"))
 
-        response = s.makefile("r", encoding="utf8", newline="\r\n")
-        statusline = response.readline()
-        version, status, explanation = statusline.split(" ", 2)
-        response_headers = {}
-        while True:
-            line = response.readline()
-            if line == "\r\n":
-                break
-            header, value = line.split(":", 1)
-            response_headers[header.casefold()] = value.strip()
+    def get_connection(self):
+        key = self.connection_key()
+        if key not in URL.connections:
+            URL.connections[key] = self.open_connection()
+        return URL.connections[key]
 
-        assert "transfer-encoding" not in response_headers
-        assert "content-encoding" not in response_headers
-
-        body = response.read()
+    def drop_connection(self):
+        key = self.connection_key()
+        if key not in URL.connections:
+            return
+        s, response = URL.connections.pop(key)
+        response.close()
         s.close()
-        return body
+
+    def request(self):
+        if self.scheme == "data":
+            return self.data
+
+        if self.scheme == "file":
+            with open(self.path, "r", encoding="utf8") as f:
+                return f.read()
+
+        for _ in [0, 1]:
+            s, response = self.get_connection()
+            try:
+                request = f"GET {self.path} HTTP/1.1\r\n"
+                request += self.build_headers()
+                request += "\r\n"
+                s.sendall(request.encode("utf8"))
+
+                statusline = response.readline()
+                if statusline == b"":
+                    raise ConnectionError("closed")
+                version, status, explanation = statusline.decode("utf8").split(" ", 2)
+
+                response_headers = {}
+                while True:
+                    line = response.readline()
+                    if line == b"\r\n":
+                        break
+                    header, value = line.decode("utf8").split(":", 1)
+                    response_headers[header.casefold()] = value.strip()
+
+                assert "transfer-encoding" not in response_headers
+                assert "content-encoding" not in response_headers
+                assert "content-length" in response_headers
+
+                content_length = int(response_headers["content-length"])
+                body = response.read(content_length).decode("utf8")
+                return body
+            except Exception as e:
+                self.drop_connection()
+        raise AssertionError("could not fetch response")
 
 
 def show(body, view_source=False):
