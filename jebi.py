@@ -15,6 +15,10 @@ USER_AGENT = "jebi/1.0"
 DEFAULT_FILE = "default.txt"
 
 
+WIDTH, HEIGHT = 800, 600
+HSTEP, VSTEP = 13, 18
+
+
 class URL:
     connections = {}
     cache = {}
@@ -261,9 +265,6 @@ class URL:
         return body
 
 
-WIDTH, HEIGHT = 800, 600
-
-
 class Browser:
     def __init__(self):
         self.window = tkinter.Tk()
@@ -273,10 +274,17 @@ class Browser:
             height=HEIGHT,
         )
         self.canvas.pack()
+        self.scroll = 0
+        self.window.bind("<Down>", self.scroll_down)
 
     def draw(self):
+        self.canvas.delete("all")
         for x, y, c in self.display_list:
-            self.canvas.create_text(x, y, text=c)
+            if y > self.scroll + HEIGHT:
+                continue
+            if y + VSTEP < self.scroll:
+                continue
+            self.canvas.create_text(x, y - self.scroll, text=c)
 
     def load(self, url: URL, view_source=False):
         redirect_count = 0
@@ -296,6 +304,10 @@ class Browser:
 
         text = lex(body, view_source=view_source)
         self.display_list = layout(text)
+        self.draw()
+
+    def scroll_down(self, e):
+        self.scroll += 100
         self.draw()
 
 
@@ -333,7 +345,6 @@ def lex(body, view_source=False):
 
 def layout(text):
     display_list = []
-    HSTEP, VSTEP = 13, 18
     cursor_x, cursor_y = HSTEP, VSTEP
     for c in text:
         display_list.append((cursor_x, cursor_y, c))
