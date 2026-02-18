@@ -3,6 +3,7 @@ import os
 import socket
 import ssl
 import time
+import tkinter
 
 
 HTTP_PORT = 80
@@ -260,22 +261,60 @@ class URL:
         return body
 
 
-def show(body, view_source=False):
-    if view_source:
-        print(body, end="")
-        return
+WIDTH, HEIGHT = 800, 600
 
+
+class Browser:
+    def __init__(self):
+        self.window = tkinter.Tk()
+        self.canvas = tkinter.Canvas(
+            self.window,
+            width=WIDTH,
+            height=HEIGHT,
+        )
+        self.canvas.pack()
+
+    def draw(self):
+        for x, y, c in self.display_list:
+            self.canvas.create_text(x, y, text=c)
+
+    def load(self, url: URL, view_source=False):
+        redirect_count = 0
+        current_url = url
+
+        while True:
+            status, headers, body = current_url.request_response()
+            if 300 <= status < 400:
+                assert redirect_count < MAX_REDIRECTS, "too many redirects"
+                assert "location" in headers
+
+                next_url = current_url.resolve(headers["location"])
+                current_url = URL(next_url)
+                redirect_count += 1
+                continue
+            break
+
+        text = lex(body, view_source=view_source)
+        self.display_list = layout(text)
+        self.draw()
+
+
+def lex(body, view_source=False):
+    if view_source:
+        return body
+
+    text = ""
     in_tag = False
     index = 0
 
     while index < len(body):
         if not in_tag and body.startswith("&lt;", index):
-            print("<", end="")
+            text += "<"
             index += 4
             continue
 
         if not in_tag and body.startswith("&gt;", index):
-            print(">", end="")
+            text += ">"
             index += 4
             continue
 
@@ -285,28 +324,25 @@ def show(body, view_source=False):
         elif char == ">":
             in_tag = False
         elif not in_tag:
-            print(char, end="")
+            text += char
 
         index += 1
 
+    return text
 
-def load(url: URL, view_source=False):
-    redirect_count = 0
-    current_url = url
 
-    while True:
-        status, headers, body = current_url.request_response()
-        if 300 <= status < 400:
-            assert redirect_count < MAX_REDIRECTS, "too many redirects"
-            assert "location" in headers
+def layout(text):
+    display_list = []
+    HSTEP, VSTEP = 13, 18
+    cursor_x, cursor_y = HSTEP, VSTEP
+    for c in text:
+        display_list.append((cursor_x, cursor_y, c))
+        cursor_x += HSTEP
 
-            next_url = current_url.resolve(headers["location"])
-            current_url = URL(next_url)
-            redirect_count += 1
-            continue
-        break
-
-    show(body, view_source=view_source)
+        if cursor_x >= WIDTH - HSTEP:
+            cursor_x = HSTEP
+            cursor_y += VSTEP
+    return display_list
 
 
 if __name__ == "__main__":
@@ -324,4 +360,5 @@ if __name__ == "__main__":
     if view_source:
         raw_url = raw_url[len("view-source:") :]
 
-    load(URL(raw_url), view_source=view_source)
+    Browser().load(URL(raw_url), view_source=view_source)
+    tkinter.mainloop()
