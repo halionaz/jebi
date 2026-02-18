@@ -37,10 +37,16 @@ def lex(body, view_source=False):
 
 
 def layout(text):
-    """Calculate text layout positions."""
+    """Calculate text layout positions with newline support."""
     display_list = []
     cursor_x, cursor_y = HSTEP, VSTEP
     for c in text:
+        if c == '\n':
+            # 줄바꿈: 새 줄 시작하고 단락 구분을 위해 y 간격 약간 늘림
+            cursor_x = HSTEP
+            cursor_y += int(VSTEP * 1.5)
+            continue
+
         display_list.append((cursor_x, cursor_y, c))
         cursor_x += HSTEP
 
