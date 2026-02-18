@@ -20,6 +20,7 @@ class Browser:
         self.canvas.pack()
         self.scroll = 0
         self.window.bind("<Down>", self.scroll_down)
+        self.window.bind("<Up>", self.scroll_up)
 
     def draw(self):
         """Render the display list on canvas."""
@@ -55,4 +56,9 @@ class Browser:
     def scroll_down(self, e):
         """Scroll down by 100 pixels."""
         self.scroll += 100
+        self.draw()
+
+    def scroll_up(self, e):
+        """Scroll up by 100 pixels."""
+        self.scroll = max(0, self.scroll - 100)
         self.draw()
